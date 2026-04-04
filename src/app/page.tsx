@@ -1,10 +1,57 @@
-import Image from "next/image";
+"use client";
+import { nanoid } from "nanoid";
+import { useEffect, useState } from "react";
+
+const ANIMALS = ["wolf", "hawk", "bear", "shark"];
+
+const STORAGE_KEY = "chat_username";
+
+const generateUsername = () => {
+  const word = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
+
+  return `anonymous-${word}-${nanoid(5)}`;
+};
 
 export default function Home() {
+  useEffect(() => {
+    const main = () => {
+      const stored = localStorage.getItem(STORAGE_KEY);
+
+      if (stored) {
+        setuserName(stored);
+
+        return;
+      }
+      const generated = generateUsername();
+
+      localStorage.setItem(STORAGE_KEY, generated);
+      setuserName(generated);
+    };
+    main();
+  }, []);
+
+  const [userName, setuserName] = useState("Arthur");
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-4">
       <div className="w-full max-w-md space-y-8">
-        <div className="border border-zinc-800 bg-zinc-900/50 backdrop-blur-md"></div>
+        <div className="border border-zinc-800 bg-zinc-900/50 backdrop-blur-md p-6">
+          <div className="space-y-5">
+            <div className="space-y-2">
+              <label className="flex items-center text-zinc-500" htmlFor="">
+                Your Identity
+              </label>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 bg-zinc-950 border border-zinc-800 text-sm text-zinc-400 font-mono p-3">
+                  {userName}
+                </div>
+              </div>
+            </div>
+
+            <button className="w-full bg-zinc-100 text-black p-3 text-sm font-bold hover:bg-zinc-50 hover:text-black transition-colors pt-2 cursor-pointer">
+              CREATE SECURE ROOM
+            </button>
+          </div>
+        </div>
       </div>
     </main>
   );
