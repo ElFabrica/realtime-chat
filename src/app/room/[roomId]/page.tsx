@@ -98,6 +98,7 @@ export default function Page() {
                 }
               }}
               autoFocus
+              placeholder={"Type message..."}
               type="text"
               className="w-full bg-black border border-zinc-800 focus:border-zinc-700 focus:outline-none transition-colors text-zinc-100 placeholder:text-zinc-700 py-3 pl-8 pr-4 text-sm"
             />
