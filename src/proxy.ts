@@ -8,9 +8,7 @@ export async function proxy(req: NextRequest) {
   const roomMatch = pathname.match(/^\/room\/([^/]+)$/);
 
   if (!roomMatch) return NextResponse.redirect(new URL("/", req.url));
-
   const roomId = roomMatch[1];
-
   const meta = await redis.hgetall<{ connected: string[]; createdAt: number }>(
     `meta:${roomId}`,
   );
