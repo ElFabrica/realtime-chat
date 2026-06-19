@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import { authMiddleware } from "./auth";
 import z from "zod";
 import { Message, realtime } from "@/lib/realtime";
+import { telegram } from "@/http/telegram/client";
 
 const ROOM_TTL_SECOUNDS = 60 * 10;
 
@@ -116,10 +117,152 @@ const messages = new Elysia({
     },
   );
 
+// ─── Telegram types ──────────────────────────────────────────────────────────
+
+interface TelegramContact {
+  chatId: string;
+  name: string;
+  username?: string;
+  addedAt: number;
+}
+
+interface TelegramStoredMessage {
+  id: string;
+  chatId: string;
+  text: string;
+  direction: "sent" | "received";
+  timestamp: number;
+  telegramMessageId?: number;
+}
+
+// ─── Telegram routes ─────────────────────────────────────────────────────────
+
+const telegramRoutes = new Elysia({ prefix: "/telegram" })
+  .get("/contacts", async () => {
+    const chatIds = await redis.smembers("telegram:contacts");
+
+    if (!chatIds.length) return { contacts: [] as TelegramContact[] };
+
+    const contacts = await Promise.all(
+      chatIds.map(async (id) => {
+        const data = await redis.hgetall(`telegram:contact:${id}`);
+        return data as TelegramContact | null;
+      }),
+    );
+
+    return {
+      contacts: contacts
+        .filter((c): c is TelegramContact => c !== null)
+        .sort((a, b) => Number(b.addedAt) - Number(a.addedAt)),
+    };
+  })
+  .post(
+    "/contacts",
+    async ({ body }) => {
+      const contact: TelegramContact = {
+        chatId: body.chatId,
+        name: body.name,
+        username: body.username,
+        addedAt: Date.now(),
+      };
+
+      await Promise.all([
+        redis.sadd("telegram:contacts", body.chatId),
+        redis.hset(`telegram:contact:${body.chatId}`, contact as unknown as Record<string, unknown>),
+      ]);
+
+      return { contact };
+    },
+    {
+      body: z.object({
+        chatId: z.string().min(1),
+        name: z.string().min(1).max(100),
+        username: z.string().optional(),
+      }),
+    },
+  )
+  .get(
+    "/messages",
+    async ({ query }) => {
+      const messages = await redis.lrange<TelegramStoredMessage>(
+        `telegram:messages:${query.chatId}`,
+        0,
+        -1,
+      );
+      return { messages };
+    },
+    { query: z.object({ chatId: z.string() }) },
+  )
+  .post(
+    "/send",
+    async ({ body }) => {
+      const { chatId, text } = body;
+
+      const sent = await telegram.sendMessage({ chat_id: chatId, text });
+
+      const message: TelegramStoredMessage = {
+        id: nanoid(),
+        chatId,
+        text,
+        direction: "sent",
+        timestamp: Date.now(),
+        telegramMessageId: sent.message_id,
+      };
+
+      await redis.rpush(`telegram:messages:${chatId}`, message);
+
+      return { message };
+    },
+    {
+      body: z.object({
+        chatId: z.string().min(1),
+        text: z.string().min(1).max(4096),
+      }),
+    },
+  )
+  .get("/sync", async () => {
+    const storedOffset = await redis.get<number>("telegram:update_offset");
+    const offset = storedOffset ?? 0;
+
+    const updates = await telegram.getUpdates({ offset, limit: 100, timeout: 0 });
+
+    if (!updates.length) return { synced: 0 };
+
+    const textUpdates = updates.filter((u) => u.message?.text);
+
+    await Promise.all(
+      textUpdates.map(async (u) => {
+        const msg = u.message!;
+        const chatId = String(msg.chat.id);
+
+        const stored: TelegramStoredMessage = {
+          id: nanoid(),
+          chatId,
+          text: msg.text!,
+          direction: "received",
+          timestamp: msg.date * 1000,
+          telegramMessageId: msg.message_id,
+        };
+
+        await redis.rpush(`telegram:messages:${chatId}`, stored);
+      }),
+    );
+
+    await redis.set(
+      "telegram:update_offset",
+      updates[updates.length - 1].update_id + 1,
+    );
+
+    return { synced: textUpdates.length };
+  });
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+
 export const app = new Elysia({ prefix: "/api" })
   .get("/", "Hello Nextjs")
   .use(rooms)
-  .use(messages);
+  .use(messages)
+  .use(telegramRoutes);
 
 export type App = typeof app;
 
