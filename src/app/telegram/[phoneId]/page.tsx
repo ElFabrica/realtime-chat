@@ -10,8 +10,8 @@ import { useEffect, useRef, useState } from "react";
 type TelegramContact = {
   chatId: string;
   name: string;
-  username?: string;
-  addedAt: number;
+  username?: string | null;
+  addedAt: Date | string;
 };
 
 type TelegramMessage = {
@@ -19,10 +19,10 @@ type TelegramMessage = {
   chatId: string;
   text: string;
   direction: "sent" | "received";
-  timestamp: number;
+  sentAt: Date | string;
 };
 
-export default function TelegramPage() {
+export default function Page() {
   const params = useParams();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -33,6 +33,9 @@ export default function TelegramPage() {
   const [newChatId, setNewChatId] = useState("");
   const [newName, setNewName] = useState("");
   const [newUsername, setNewUsername] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+
+  const chatIdValid = /^-?[1-9]\d*$/.test(newChatId.trim());
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -63,20 +66,30 @@ export default function TelegramPage() {
 
   const { mutate: addContact, isPending: isAddingContact } = useMutation({
     mutationFn: async () => {
-      await client.telegram.contacts.post({
+      const res = await client.telegram.contacts.post({
         chatId: newChatId.trim(),
         name: newName.trim(),
         username: newUsername.trim() || undefined,
       });
+      if (res.error) {
+        const msg =
+          (res.error as { error?: string } | null)?.error ??
+          "Erro ao adicionar contato.";
+        throw new Error(msg);
+      }
     },
     onSuccess: () => {
       const id = newChatId.trim();
       queryClient.invalidateQueries({ queryKey: ["telegram", "contacts"] });
+      setAddError(null);
       setShowAddForm(false);
       setNewChatId("");
       setNewName("");
       setNewUsername("");
       router.push(`/telegram/${id}`);
+    },
+    onError: (err) => {
+      setAddError(err instanceof Error ? err.message : "Erro desconhecido.");
     },
   });
 
@@ -138,19 +151,35 @@ export default function TelegramPage() {
 
           {showAddForm && (
             <div className="p-2 border-b border-zinc-800 space-y-1.5">
-              <input
-                autoFocus
-                placeholder="Chat ID *"
-                value={newChatId}
-                onChange={(e) => setNewChatId(e.target.value)}
-                className="w-full bg-black border border-zinc-700 focus:border-zinc-500 focus:outline-none text-zinc-200 placeholder:text-zinc-700 px-2.5 py-1.5 text-[11px]"
-              />
+              <div>
+                <input
+                  autoFocus
+                  placeholder="Chat ID *"
+                  value={newChatId}
+                  onChange={(e) => {
+                    setNewChatId(e.target.value);
+                    setAddError(null);
+                  }}
+                  className={cn(
+                    "w-full bg-black border focus:outline-none text-zinc-200 placeholder:text-zinc-700 px-2.5 py-1.5 text-[11px]",
+                    newChatId && !chatIdValid
+                      ? "border-red-700 focus:border-red-500"
+                      : "border-zinc-700 focus:border-zinc-500",
+                  )}
+                />
+                {newChatId && !chatIdValid && (
+                  <p className="text-[10px] text-red-500 mt-1 px-0.5">
+                    ID inválido — deve ser um número inteiro (ex: 123456789 ou
+                    -1001234567890)
+                  </p>
+                )}
+              </div>
               <input
                 placeholder="Display name *"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && newChatId.trim() && newName.trim())
+                  if (e.key === "Enter" && chatIdValid && newName.trim())
                     addContact();
                 }}
                 className="w-full bg-black border border-zinc-700 focus:border-zinc-500 focus:outline-none text-zinc-200 placeholder:text-zinc-700 px-2.5 py-1.5 text-[11px]"
@@ -161,11 +190,12 @@ export default function TelegramPage() {
                 onChange={(e) => setNewUsername(e.target.value)}
                 className="w-full bg-black border border-zinc-700 focus:border-zinc-500 focus:outline-none text-zinc-200 placeholder:text-zinc-700 px-2.5 py-1.5 text-[11px]"
               />
+              {addError && (
+                <p className="text-[10px] text-red-500 px-0.5">{addError}</p>
+              )}
               <button
                 onClick={() => addContact()}
-                disabled={
-                  !newChatId.trim() || !newName.trim() || isAddingContact
-                }
+                disabled={!chatIdValid || !newName.trim() || isAddingContact}
                 className="w-full text-[11px] font-bold bg-zinc-100 text-black py-1.5 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-white transition-colors"
               >
                 {isAddingContact ? "SAVING..." : "SAVE"}
@@ -186,9 +216,7 @@ export default function TelegramPage() {
                 return (
                   <button
                     key={contact.chatId}
-                    onClick={() =>
-                      router.push(`/room/telegram/${contact.chatId}`)
-                    }
+                    onClick={() => router.push(`/telegram/${contact.chatId}`)}
                     className={cn(
                       "w-full text-left px-3 py-3 border-b border-zinc-800/40 transition-colors flex items-start gap-2",
                       isActive
@@ -302,7 +330,7 @@ export default function TelegramPage() {
                       {msg.text}
                     </p>
                     <p className="text-[10px] text-zinc-600 mt-1">
-                      {format(Number(msg.timestamp), "HH:mm")}
+                      {format(new Date(msg.sentAt), "HH:mm")}
                     </p>
                   </div>
                 </div>

@@ -1,5 +1,6 @@
 import type {
   AnswerCallbackQueryParams,
+  Chat,
   CopyMessageParams,
   DeleteMessageParams,
   DeleteWebhookParams,
@@ -95,6 +96,10 @@ export class TelegramClient {
 
   copyMessage(params: CopyMessageParams): Promise<MessageId> {
     return this.call<MessageId>("copyMessage", params);
+  }
+
+  getChat(chat_id: string | number): Promise<Chat> {
+    return this.call<Chat>("getChat", { chat_id });
   }
 
   getUpdates(params?: GetUpdatesParams): Promise<Update[]> {

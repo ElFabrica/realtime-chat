@@ -5,6 +5,7 @@ import { authMiddleware } from "./auth";
 import z from "zod";
 import { Message, realtime } from "@/lib/realtime";
 import { telegram } from "@/http/telegram/client";
+import { prisma } from "@/lib/prisma";
 
 const ROOM_TTL_SECOUNDS = 60 * 10;
 
@@ -117,65 +118,43 @@ const messages = new Elysia({
     },
   );
 
-// ─── Telegram types ──────────────────────────────────────────────────────────
-
-interface TelegramContact {
-  chatId: string;
-  name: string;
-  username?: string;
-  addedAt: number;
-}
-
-interface TelegramStoredMessage {
-  id: string;
-  chatId: string;
-  text: string;
-  direction: "sent" | "received";
-  timestamp: number;
-  telegramMessageId?: number;
-}
-
 // ─── Telegram routes ─────────────────────────────────────────────────────────
 
 const telegramRoutes = new Elysia({ prefix: "/telegram" })
   .get("/contacts", async () => {
-    const chatIds = await redis.smembers("telegram:contacts");
-
-    if (!chatIds.length) return { contacts: [] as TelegramContact[] };
-
-    const contacts = await Promise.all(
-      chatIds.map(async (id) => {
-        const data = await redis.hgetall(`telegram:contact:${id}`);
-        return data as TelegramContact | null;
-      }),
-    );
-
-    return {
-      contacts: contacts
-        .filter((c): c is TelegramContact => c !== null)
-        .sort((a, b) => Number(b.addedAt) - Number(a.addedAt)),
-    };
+    const contacts = await prisma.telegramContact.findMany({
+      orderBy: { addedAt: "desc" },
+    });
+    return { contacts };
   })
   .post(
     "/contacts",
     async ({ body }) => {
-      const contact: TelegramContact = {
-        chatId: body.chatId,
-        name: body.name,
-        username: body.username,
-        addedAt: Date.now(),
-      };
+      try {
+        await telegram.getChat(body.chatId);
+      } catch {
+        throw new Error("Room does not exist");
+      }
 
-      await Promise.all([
-        redis.sadd("telegram:contacts", body.chatId),
-        redis.hset(`telegram:contact:${body.chatId}`, contact as unknown as Record<string, unknown>),
-      ]);
-
+      const contact = await prisma.telegramContact.upsert({
+        where: { chatId: body.chatId },
+        update: { name: body.name, username: body.username },
+        create: {
+          chatId: body.chatId,
+          name: body.name,
+          username: body.username,
+        },
+      });
       return { contact };
     },
     {
       body: z.object({
-        chatId: z.string().min(1),
+        chatId: z
+          .string()
+          .regex(
+            /^-?[1-9]\d*$/,
+            "Chat ID inválido: deve ser um número inteiro sem zeros à esquerda",
+          ),
         name: z.string().min(1).max(100),
         username: z.string().optional(),
       }),
@@ -184,11 +163,10 @@ const telegramRoutes = new Elysia({ prefix: "/telegram" })
   .get(
     "/messages",
     async ({ query }) => {
-      const messages = await redis.lrange<TelegramStoredMessage>(
-        `telegram:messages:${query.chatId}`,
-        0,
-        -1,
-      );
+      const messages = await prisma.telegramMessage.findMany({
+        where: { chatId: query.chatId },
+        orderBy: { sentAt: "asc" },
+      });
       return { messages };
     },
     { query: z.object({ chatId: z.string() }) },
@@ -198,18 +176,24 @@ const telegramRoutes = new Elysia({ prefix: "/telegram" })
     async ({ body }) => {
       const { chatId, text } = body;
 
-      const sent = await telegram.sendMessage({ chat_id: chatId, text });
+      let sent;
+      try {
+        sent = await telegram.sendMessage({ chat_id: chatId, text });
+      } catch (err) {
+        const description = err instanceof Error ? err.message : String(err);
+        throw new Error(description);
+      }
 
-      const message: TelegramStoredMessage = {
-        id: nanoid(),
-        chatId,
-        text,
-        direction: "sent",
-        timestamp: Date.now(),
-        telegramMessageId: sent.message_id,
-      };
-
-      await redis.rpush(`telegram:messages:${chatId}`, message);
+      const message = await prisma.telegramMessage.create({
+        data: {
+          id: nanoid(),
+          chatId,
+          text,
+          direction: "sent",
+          sentAt: new Date(),
+          telegramMessageId: sent.message_id,
+        },
+      });
 
       return { message };
     },
@@ -221,39 +205,132 @@ const telegramRoutes = new Elysia({ prefix: "/telegram" })
     },
   )
   .get("/sync", async () => {
-    const storedOffset = await redis.get<number>("telegram:update_offset");
-    const offset = storedOffset ?? 0;
+    let state;
+    try {
+      state = await prisma.telegramSyncState.upsert({
+        where: { id: 1 },
+        update: {},
+        create: { id: 1, offset: 0 },
+      });
+      console.log("[sync] state ok", state);
+    } catch (err) {
+      console.error("[sync] prisma.upsert FAILED", err);
+      throw err;
+    }
 
-    const updates = await telegram.getUpdates({ offset, limit: 100, timeout: 0 });
+    let updates;
+    try {
+      updates = await telegram.getUpdates({
+        offset: state.offset,
+        limit: 100,
+        timeout: 0,
+      });
+      console.log("[sync] getUpdates ok", { count: updates.length });
+    } catch (err) {
+      console.error("[sync] getUpdates FAILED", err);
+      throw err;
+    }
 
     if (!updates.length) return { synced: 0 };
 
     const textUpdates = updates.filter((u) => u.message?.text);
 
-    await Promise.all(
-      textUpdates.map(async (u) => {
-        const msg = u.message!;
-        const chatId = String(msg.chat.id);
+    if (textUpdates.length > 0) {
+      try {
+        for (const u of textUpdates) {
+          const msg = u.message!;
+          const chatId = String(msg.chat.id);
+          const name =
+            msg.chat.title ??
+            ([msg.from?.first_name, msg.from?.last_name]
+              .filter(Boolean)
+              .join(" ") ||
+              chatId);
+          const username = msg.from?.username ?? msg.chat.username ?? undefined;
 
-        const stored: TelegramStoredMessage = {
-          id: nanoid(),
-          chatId,
-          text: msg.text!,
-          direction: "received",
-          timestamp: msg.date * 1000,
-          telegramMessageId: msg.message_id,
-        };
+          await prisma.telegramContact.upsert({
+            where: { chatId },
+            update: {},
+            create: { chatId, name, username },
+          });
 
-        await redis.rpush(`telegram:messages:${chatId}`, stored);
-      }),
-    );
+          await prisma.telegramMessage.create({
+            data: {
+              id: nanoid(),
+              chatId,
+              text: msg.text!,
+              direction: "received",
+              sentAt: new Date(msg.date * 1000),
+              telegramMessageId: msg.message_id,
+            },
+          });
+        }
+        console.log("[sync] messages saved", { count: textUpdates.length });
+      } catch (err) {
+        console.error("[sync] save FAILED", err);
+        throw err;
+      }
+    }
 
-    await redis.set(
-      "telegram:update_offset",
-      updates[updates.length - 1].update_id + 1,
-    );
+    try {
+      await prisma.telegramSyncState.update({
+        where: { id: 1 },
+        data: { offset: updates[updates.length - 1].update_id + 1 },
+      });
+    } catch (err) {
+      console.error("[sync] update offset FAILED", err);
+      throw err;
+    }
 
     return { synced: textUpdates.length };
+  })
+  .post("/webhook", async ({ body }) => {
+    const update = body as {
+      message?: {
+        message_id: number;
+        date: number;
+        text?: string;
+        chat: { id: number; title?: string; username?: string };
+        from?: { first_name?: string; last_name?: string; username?: string };
+      };
+    };
+
+    const msg = update.message;
+    if (!msg?.text) return { ok: true };
+
+    const chatId = String(msg.chat.id);
+    const name =
+      msg.chat.title ??
+      ([msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") ||
+        chatId);
+    const username = msg.from?.username ?? msg.chat.username ?? undefined;
+
+    await prisma.telegramContact.upsert({
+      where: { chatId },
+      update: {},
+      create: { chatId, name, username },
+    });
+
+    await prisma.telegramMessage.upsert({
+      where: { telegramMessageId: msg.message_id },
+      update: {},
+      create: {
+        chatId,
+        text: msg.text,
+        direction: "received",
+        sentAt: new Date(msg.date * 1000),
+        telegramMessageId: msg.message_id,
+      },
+    });
+
+    return { ok: true };
+  })
+  .get("/webhook/setup", async () => {
+    const url = process.env.NEXT_PUBLIC_APP_URL;
+    if (!url) throw new Error("NEXT_PUBLIC_APP_URL não definida no .env");
+
+    await telegram.setWebhook({ url: `${url}/api/telegram/webhook` });
+    return { ok: true, webhook: `${url}/api/telegram/webhook` };
   });
 
 // ─── App ──────────────────────────────────────────────────────────────────────

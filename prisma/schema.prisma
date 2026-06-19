@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model TelegramContact {
+  chatId   String            @id
+  name     String
+  username String?
+  addedAt  DateTime          @default(now())
+  messages TelegramMessage[]
+}
+
+model TelegramMessage {
+  id                String          @id @default(uuid())
+  chatId            String
+  contact           TelegramContact @relation(fields: [chatId], references: [chatId], onDelete: Cascade)
+  text              String
+  direction         Direction
+  sentAt            DateTime
+  telegramMessageId Int? @unique
+
+  @@index([chatId, sentAt])
+}
+
+model TelegramSyncState {
+  id     Int @id @default(autoincrement())
+  offset Int @default(0)
+}
+
+enum Direction {
+  sent
+  received
+}
